@@ -17,6 +17,8 @@
 ## Descrição do projeto
 O Invetory Manager (Gerente de estoque), tem o principal objetivo em atualizar preços e estoque de todos os produtos da loja KAIZENAUTOPECAS no Mercado livre. Também realiza manutenções de anúncios com outro projeto da organização da empresa, chamado WALL-E que também está no repositório inicial.
 
+## Fluxograma :thread:
+
 ```mermaid
 graph TD;
 
@@ -35,6 +37,7 @@ G-->H[(Updated Banco de Dados)]
 
 ```
 
+## Exemplo:
 
 ![Exemplo do Projeto](./docs/img.jpg)
 
