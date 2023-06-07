@@ -1,0 +1,3 @@
+py ./src/copy_todos_proct.py --siac S:/TodosProdutos/ --out C:\Users\jeferson.lopes\Documents\Python\manager_invetory\data\
+py ./src/is_not_item_id.py --conta 1
+py ./src/is_not_item_id.py --conta 2

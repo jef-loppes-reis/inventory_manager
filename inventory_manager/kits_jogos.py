@@ -1,0 +1,249 @@
+import pandas as pd
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+from tqdm import tqdm
+from pecista import Postgres, MLInterface
+from math import floor
+from concurrent.futures import ProcessPoolExecutor
+from requests import put
+from time import sleep, perf_counter
+from datetime import date, datetime
+from itertools import repeat
+
+
+def convert_temp(seconds):
+    seconds = seconds % (24 * 3600) 
+    hour = seconds // 3600
+    seconds %= 3600
+    minutes = seconds // 60
+    seconds %= 60
+
+    return "%d:%02d:%02d" % (hour, minutes, seconds) 
+
+def todoprodutos_today_name() -> str:
+    """Função para retornar string.
+
+    Returns
+    -------
+    str
+        todosprodutos-2023_02_16
+    """
+    data_atual = date.today().strftime('%Y_%m_%d')
+    data_atual = 'todosProdutos-' + data_atual
+
+    return data_atual
+
+def condicao_if(
+        preco_kaizen:float, cost_frete:float) -> float:
+    """Função para calcular o preço final do produto.
+
+    Parameters
+    ----------
+    preco_kaizen : float
+        P_KAIZEN
+
+    cost_frete : float
+        Custo de frete item_id
+
+    Returns
+    -------
+    float
+        Calculo da função
+    """
+    #----- Antiga Regra -----
+    # if cost_frete < 17.95:
+    #     cost_frete = 17.95
+    # if preco_kaizen + cost_frete >= 79.00:
+    #     return (1, round(preco_kaizen + cost_frete, 2))
+    # elif (preco_kaizen + cost_frete < 79.00) and (preco_kaizen + (2*cost_frete) >= 79.00):
+    #     return (2, 79.00)
+    # elif (preco_kaizen + (2*cost_frete) < 79.00):
+    #     return (3, round(preco_kaizen + 6.03, 2))
+    if preco_kaizen < 7:
+        preco_kaizen = 7
+    if preco_kaizen >= 79.00:
+        return (1, round(preco_kaizen + cost_frete, 2))
+    if (preco_kaizen + 6.63 >= 79.00) & (preco_kaizen < 79.00):
+        return (2, 78.99)
+    return (3, preco_kaizen + 6.63)
+
+def upgrade_price_stock(
+        mlb:str,
+        price:float,
+        stock:int,
+        access_token:str='',
+        condition_price:bool=False,
+        condition_price_storage:bool=False,
+        condition_storage:bool=False) -> tuple:
+
+    url = f"https://api.mercadolibre.com/items/{mlb}"
+
+    if condition_price_storage:
+        # Preço e Estoque
+        payload_price_storage = {
+            'price': float(price),
+            'available_quantity': int(stock)
+            }
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+            }
+        response = put(url=url, json=payload_price_storage, headers=headers)
+        return response.status_code, response.text
+
+    if condition_storage:
+        # Estoque
+        payload_storage = {
+            'available_quantity': int(stock)
+            }
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+            }
+
+        response = put(url=url, json=payload_storage, headers=headers)
+        return response.status_code, response.text
+
+    if condition_price:
+        # Preco
+        payload_price = {
+            'price': float(price)
+            }
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+            }
+
+        response = put(url=url, json=payload_price, headers=headers)
+        return response.status_code, response.text
+    
+def interation(mlb_:str, price_:float, quantity_:int, idx:int, access_token:str='') -> dict:
+
+    response, response_text = upgrade_price_stock(
+        mlb=mlb_,
+        price=price_,
+        stock=quantity_,
+        access_token=access_token,
+        condition_price_storage=True,
+        condition_storage=False
+        )
+
+    if response == 400:
+        response, response_text = upgrade_price_stock(
+            mlb=mlb_,
+            price=price_,
+            stock=quantity_,
+            access_token=access_token,
+            condition_price_storage=True,
+            condition_storage=False
+        )
+    # if response == 500:
+    #     # print(mlb_, response)
+    #     pass
+    # if response == 401:
+    #     # print('Token desatualizado !')
+    #     pass
+
+    while (response == 429) or (response == 500):
+        sleep(10)
+        # print('Aguardando requisição !',mlb_, response)
+        response, response_text = upgrade_price_stock(
+            mlb=mlb_,
+            price=price_,
+            stock=quantity_,
+            access_token=access_token,
+            condition_price_storage=True,
+            condition_storage=False
+            )
+
+    return {'item_id':mlb_, 'price':price_, 'storage':quantity_, 'response':response, 'response_text':response_text, 'idx':idx}
+
+def update_bank(df_aux:pd.DataFrame, conta_1:bool=False):
+
+    table = 'ml1_info' if conta_1 else 'ml2_info'
+    with Postgres() as db: db.update(df=df_aux, id_col='item_id', table=table)
+
+def data_bases():
+    
+    with Postgres() as db:
+        df_ml_info = db.query('SELECT * FROM "ECOMM".ml1_info')
+        df_ml_frete = db.query('SELECT * FROM "ECOMM".ml1_frete')
+
+        df_siac_storage = db.query('''
+    SELECT tb_produto.codpro, tb_produto.num_fab as sku, tb_estoque.estoque
+    FROM "D-1".produto as tb_produto
+    INNER JOIN (SELECT codpro, SUM(estoque) as ESTOQUE FROM "H-1".prd_loja GROUP BY codpro) as tb_estoque
+    ON tb_produto.codpro = tb_estoque.codpro''').fillna({'estoque':0})
+    
+    df_price_kaizen = pd.read_csv(f'./data/{todoprodutos_today_name()}.csv', sep=';', low_memory=False, dtype=str)[['NRFABRICA', 'P_KAIZEN']]
+
+    return df_ml_info, df_ml_frete, df_siac_storage, df_price_kaizen
+
+def analitic(df_ml_info:pd.DataFrame, df_ml_frete:pd.DataFrame, df_siac_storage:pd.DataFrame, df_price_kaizen:pd.DataFrame):
+
+    df_jogo = df_ml_info.query('jogo').reset_index(drop=True)
+    df_jogo[['type','qtd','sku']] = df_jogo.sku.str.split('_', expand=True)
+    df_jogo = df_jogo.astype({'qtd':int})
+
+    df_price_kaizen['NRFABRICA'] = df_price_kaizen.NRFABRICA.str.replace('[','').str.replace(']','')
+    df_price_kaizen['P_KAIZEN'] = df_price_kaizen.P_KAIZEN.str.replace(',','.')
+    df_price_kaizen = df_price_kaizen.astype({'P_KAIZEN':float})
+    df_price_kaizen = df_price_kaizen.rename({'NRFABRICA':'sku', 'P_KAIZEN':'price_kaizen'}, axis=1)
+
+    df_jogo = pd.merge(df_jogo, df_price_kaizen, on='sku', how='left')
+    df_jogo = pd.merge(df_jogo, df_ml_frete, on='item_id', how='left')
+    df_jogo = pd.merge(df_jogo, df_siac_storage[['sku', 'estoque']], on='sku', how='left')
+    
+    df_jogo['estoque_jogo'] = (df_jogo.estoque / df_jogo.qtd).apply(lambda x : floor(x))
+    df_jogo['jogo_price'] = df_jogo.qtd * df_jogo.price_kaizen
+
+    for idx in tqdm(df_jogo.index, total=len(df_jogo)):
+        price = df_jogo.loc[idx, 'jogo_price']
+        list_cost = df_jogo.loc[idx, 'list_cost']
+        df_jogo.loc[idx, 'jogo_price'] = condicao_if(price, list_cost)[1]
+
+    df_jogo_out = df_jogo[['item_id', 'estoque_jogo', 'jogo_price']]
+    df_jogo_out = pd.merge(df_ml_info, df_jogo_out, on='item_id', how='left').query('jogo')
+
+    for idx in tqdm(df_jogo_out.index, total=len(df_jogo_out)):
+        df_jogo_out.loc[idx, 'atualizar'] = (df_jogo_out.loc[idx, 'price'] != df_jogo_out.loc[idx, 'jogo_price']) or (df_jogo_out.loc[idx, 'storage'] != df_jogo_out.loc[idx, 'estoque_jogo'])
+    
+    df_jogo_out = df_jogo_out.query('atualizar')
+
+    return df_jogo_out
+
+if __name__ == '__main__':
+
+    print(f'\nAtualizando JOGOS...')
+    start_temp = perf_counter()
+
+    ml = MLInterface()
+    TOKEN = ml._get_token(1)
+
+    df_ml_info, df_ml_frete, df_siac_storage, df_price_kaizen = data_bases()
+    df_jogo_out = analitic(df_ml_info, df_ml_frete, df_siac_storage, df_price_kaizen)
+
+    df_aux = pd.DataFrame(columns=['item_id', 'price', 'storage', 'response', 'response_text'])
+    with ProcessPoolExecutor() as exe:
+        for future in tqdm(exe.map(
+            interation, df_jogo_out['item_id'], df_jogo_out['jogo_price'], df_jogo_out['estoque_jogo'], df_jogo_out.index, repeat(TOKEN)), total=len(df_jogo_out)):
+            # print(future['item_id'], future['response'], future['idx'])
+            df_aux.loc[len(df_aux)] = future
+
+    update_bank(
+        df_aux.query('response == 200')[['item_id', 'price', 'storage']].reset_index(drop=True), conta_1=True )
+
+    if len(df_aux.query('response != 200')) != 0:
+        df_aux.query('response != 200').reset_index(drop=True).to_csv(f'./temp/jogos/routine_jogos_{str(datetime.today().strftime("%m%d%Y_%H%M%S"))}.csv', index=False)
+
+    end_temp = perf_counter()
+
+    string_log = f'''
+### Atualizacao JOGOS ###
+{datetime.today().strftime('%m/%d/%Y, %H:%M:%S')}
+Quantidade de items_ids = {len(df_aux['item_id'])}
+Quantidade de itens atualizados = {len(df_aux.query('response == 200'))}
+Quantidade de itens não atualizados = {len(df_aux['item_id']) - len(df_aux.query('response == 200'))}
+Tempo total de execução {convert_temp(seconds=int(end_temp-start_temp))}'''
+
+    print(string_log)
