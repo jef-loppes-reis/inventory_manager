@@ -53,9 +53,9 @@ Você pode acessar os arquivos do projeto clicando [aqui](https://github.com/E-c
 
 ## ✔️ Técnicas e tecnologias utilizadas
 
-- ``Python 3.11.3``
-- Pandas
-- Requests
+- ``Python 3.11.3`` 
+- ``Pandas``
+- ``Requests``
 
 ## Autores
 
